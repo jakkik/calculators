@@ -3,6 +3,7 @@ import {HalfSection} from "./component/section"
 import {zeroPad,isNumber} from "../util/util"
 import {intToHexStr,hexStrToInt} from "../calc/numbers"
 import Item from "./component/item"
+import * as Bacon from "baconjs"
 import TextField from "material-ui/TextField"
 import Avatar from "material-ui/Avatar"
 import ByteValueSelector from "./component/byte-value-selector"
@@ -17,20 +18,12 @@ function toRGBColor(r, g, b) {
     return (isNumber(r) && isNumber(g) && isNumber(b)) ? `rgb(${r}, ${g}, ${b})` : ""
 }
 
-function toHexColor(r, g, b) {
-    return (isNumber(r) && isNumber(g) && isNumber(b)) ? `#${toHexComp(r)}${toHexComp(g)}${toHexComp(b)}` : ""
-}
-
 function isValidComp(value) {
     return isNumber(value) && !isNaN(value) &&  value >= 0 && value <= 255
 }
 
 function toHexComp(value) {
     return isValidComp(value) ? zeroPad(intToHexStr(value), 2) : ""
-}
-
-function validateHex(value) {
-    return (value && value[0] == "#") ? value : "#" + value
 }
 
 function hexToComponents(value) {
@@ -41,15 +34,31 @@ function hexToComponents(value) {
         r = hexStrToInt(rr)
         g = hexStrToInt(gg)
         b = hexStrToInt(bb)
-        return ""
+        return undefined
     })
 
-    return [r, g, b]
+    return (isNumber(r) && isNumber(g) && isNumber(b)) ? { r: r, g: g, b: b } : undefined
+}
+
+function componentsToHex(value) {
+    const r = `#${toHexComp(value.r)}${toHexComp(value.g)}${toHexComp(value.b)}`
+    return r
 }
 
 const texts = {
     hex: "Heksakoodi",
-    rgb: "RGB-arvo"
+    rgb: "RGB-arvo",
+    r: "Red",
+    g: "Green",
+    b: "Blue"
+}
+
+const comps = ["r", "g", "b"]
+const compInfo = {
+    "hex": { write: v => v.hex },
+    "r": { write: v => v.r },
+    "g": { write: v => v.g },
+    "b": { write: v => v.b }
 }
 
 export default class Colors extends React.Component {
@@ -57,53 +66,48 @@ export default class Colors extends React.Component {
     constructor(props) {
         super(props)
 
-        this.setComponent = this.setComponent.bind(this)
-        this.setFromHex = this.setFromHex.bind(this)
+        this.valueChanged = this.valueChanged.bind(this)
         this.select = this.select.bind(this)
 
         this.components = ["r", "g", "b"]
         this.state = {
-            r: 255,
-            g: 255,
-            b: 255,
             hex: "#FFFFFF",
             color: "#FFFFFF",
             selected: "hex"
         }
+        this.streams = {
+            hex: new Bacon.Bus(),
+            curSrc: new Bacon.Bus()
+        }
+        this.streams.hex.onValue(v => this.setState({ hex: v }))
+        comps.forEach(c => {
+            this.state[c] = 255
+            this.streams[c] = new Bacon.Bus()
+            this.streams[c].onValue(v => this.setState({[c]: v}))
+        })
+        const compStr = Bacon.combineTemplate({ r: this.streams.r, g: this.streams.g, b: this.streams.b})
+        const hexStr = this.streams.hex.map(hexToComponents).filter(v => v !== undefined)
+        const newValue = Bacon.mergeAll(compStr, hexStr)
+        Bacon.combineTemplate({ value: newValue, src: this.streams.curSrc.skipDuplicates() }).onValue(t => {
+            t.value.hex = componentsToHex(t.value)
+            this.setState({ color: t.value.hex })
+            if (t.src !== "hex") this.setState({ hex: t.value.hex })
+            comps.forEach(c => {
+                if (t.src != c) {
+                    const v = compInfo[c].write(t.value)
+                    this.setState({[c]: v})
+                    this.refs[c].setValue(v)
+                }
+            })
+        })
     }
 
     componentDidMount() {
-        this.updateHex({ r: this.state.r, g: this.state.g, b: this.state.b })
-    }
-
-    updateHex(values) {
-        const hexd = toHexColor(values.r, values.g, values.b)
-        this.setState({ hex: hexd, color: hexd })
-    }
-
-    updateComponents(r, g, b) {
-        const values = {r: r, g: g, b: b}
-        this.setState(values)
-        this.components.forEach(c => this.refs[c].setValue(values[c]))
+        comps.forEach(c => this.streams[c].push(255))
     }
 
     asRgb() {
         return toRGBColor(this.state.r, this.state.g, this.state.b)
-    }
-
-    setComponent(c, val) {
-        let values = { r: this.state.r, g: this.state.g, b: this.state.b }
-        this.setState({[c]: val})
-        values[c] = val
-        this.updateHex(values)
-        this.sendToParent()
-    }
-
-    setFromHex(value) {
-        this.setState({hex: value, color: validateHex(value)})
-        const comps = hexToComponents(value)
-        this.updateComponents(comps[0], comps[1], comps[2])
-        this.sendToParent()
     }
 
     sendToParent(src) {
@@ -116,20 +120,26 @@ export default class Colors extends React.Component {
         this.sendToParent(src)
     }
 
+    valueChanged(value, src) {
+        this.streams.curSrc.push(src)
+        this.streams[src].push(value)
+    }
+
     render() {
         return <HalfSection title="Väri" subtitle={texts[this.state.selected]}
                         avatar={<Avatar backgroundColor={this.state.color} style={styles.avatar}>&nbsp;</Avatar>}>
             <Item name="Heksa">
                 <TextField hintText="#FFFFFF" name="color-hex" value={this.state.hex} maxLength={7}
-                           onChange={e => this.setFromHex(e.target.value)} onFocus={e => this.select("hex")}/>
+                           onChange={e => this.valueChanged(e.target.value, "hex")} onFocus={e => this.select("hex")}/>
             </Item>
             <Item name="RGB-arvo">
                 <TextField hintText="rgb(255,255,255)" name="color-rgb" value={this.asRgb()} readOnly
                            onFocus={e => this.select("rgb")}/>
             </Item>
-            <ByteValueSelector name="Red" value={this.state.r} onValue={v => this.setComponent("r", v)} ref="r"/>
-            <ByteValueSelector name="Green" value={this.state.g} onValue={v => this.setComponent("g", v)} ref="g"/>
-            <ByteValueSelector name="Blue" value={this.state.b} onValue={v => this.setComponent("b", v)} ref="b"/>
+            {
+                comps.map(c => <ByteValueSelector key={c} name={texts[c]} value={this.state[c]}
+                                                  onValue={v => this.valueChanged(v, c)} ref={c} />)
+            }
         </HalfSection>
 
     }
